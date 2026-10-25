@@ -33,7 +33,10 @@ class MainActivity : Activity() {
         render(); ListenService.start(this)
         Thread { Core.poll(this, false); runOnUiThread { render() } }.start()
     }
-    override fun onPause() { super.onPause(); try { unregisterReceiver(rx) } catch (_: Exception) {} }
+    private val h = Handler(Looper.getMainLooper())
+    private val tick = object : Runnable { override fun run() { render(); h.postDelayed(this, 30000) } }
+    override fun onPause() { super.onPause(); h.removeCallbacks(tick); try { unregisterReceiver(rx) } catch (_: Exception) {} }
+    override fun onPostResume() { super.onPostResume(); h.removeCallbacks(tick); h.postDelayed(tick, 30000) }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun text(t: String, size: Float = 16f, color: Int = dark, bold: Boolean = false) = TextView(this).apply {
@@ -53,19 +56,32 @@ class MainActivity : Activity() {
         root.addView(text("💌 Love Chat", 28f, pink, true).apply { gravity = Gravity.CENTER })
         val p = Core.prefs(this); val code = Core.code(this)
         if (code == null) { renderPair(); return }
+        Core.codeCache = code
+        val conn = p.getBoolean("conn", false); val seen = p.getLong("seen", 0)
+        val ago = (System.currentTimeMillis() - seen) / 60000
+        val partner = when { seen == 0L -> "⚪ Партнёр ещё не подключился"
+            ago < 3 -> "🟢 Партнёр в сети"
+            ago < 60 -> "🟡 Партнёр был(а) в сети $ago мин назад"
+            ago < 1440 -> "🟡 Партнёр был(а) в сети ${ago / 60} ч назад"
+            else -> "⚪ Партнёр был(а) в сети ${ago / 1440} дн назад" }
+        root.addView(card(text(if (conn) "🟢 Ты подключён(а)" else "🔴 Нет связи с сервером (переподключаюсь…)", 14f, dark, true),
+            text(partner, 14f, dark, true)))
 
         root.addView(card(
             text("Сообщение от " + (p.getString("partnerName", "").takeUnless { it.isNullOrBlank() } ?: "любимого человека"), 13f),
             text(p.getString("inText", null) ?: "Пока нет сообщений ❤", 22f, dark, true),
+            ImageView(this).apply { val b = if (p.getString("inKind", "t") == "img") Core.loadImg(this@MainActivity, 900) else null
+                if (b != null) { setImageBitmap(b); adjustViewBounds = true; setBackgroundColor(Color.WHITE) } else visibility = View.GONE },
             text(Core.fmtTime(p.getLong("inTime", 0)), 12f)))
         val msg = field("Напиши что-нибудь тёплое…").apply { minLines = 2 }
         root.addView(msg)
         root.addView(button("Отправить ❤") {
             val t = msg.text.toString().trim(); if (t.isEmpty()) return@button
-            Thread { val ok = Core.send(this, t); runOnUiThread {
-                Toast.makeText(this, if (ok) "Отправлено 💕" else "Не удалось отправить. Проверь интернет", Toast.LENGTH_SHORT).show()
-                if (ok) render() } }.start()
+            Thread { val err = Core.send(this, t); runOnUiThread {
+                if (err == null) { Toast.makeText(this, "Отправлено 💕", Toast.LENGTH_SHORT).show(); render() }
+                else android.app.AlertDialog.Builder(this).setTitle("Не удалось отправить").setMessage(err).setPositiveButton("OK", null).show() } }.start()
         })
+        root.addView(button("🎨 Нарисовать") { startActivity(Intent(this, DrawActivity::class.java)) })
         p.getString("lastSent", null)?.let { root.addView(text("Ты отправил(а): «$it» · ${Core.fmtTime(p.getLong("lastSentTime", 0))}", 13f)) }
 
         // Permissions / setup checklist

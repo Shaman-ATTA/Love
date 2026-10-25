@@ -20,7 +20,9 @@ class ListenService : Service() {
             .setContentIntent(Core.openAppPI(this)).setOngoing(true).build()
         if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) else startForeground(1, n)
         if (Core.code(this) == null) { stopSelf(); return START_NOT_STICKY }
-        if (thread?.isAlive != true) { running = true; thread = Thread { loop() }.also { it.start() } }
+        if (thread?.isAlive != true) { running = true; thread = Thread { loop() }.also { it.start() }
+            Thread { while (running) { try { Thread.sleep(120000) } catch (e: InterruptedException) { break }
+                if (running && Core.prefs(this).getBoolean("conn", false)) Core.sendPresence(this, false) } }.start() }
         return START_STICKY
     }
     private fun loop() {
@@ -31,17 +33,19 @@ class ListenService : Service() {
                 val conn = URL("${Core.SERVER}/${Core.topic(code)}/json?since=${Core.sinceParam(this)}").openConnection() as HttpURLConnection
                 conn.connectTimeout = 15000; conn.readTimeout = 90000 // ntfy sends keepalive every ~45s
                 conn.inputStream.bufferedReader().use { r ->
-                    backoff = 2000L
+                    backoff = 2000L; Core.setConnected(this, true)
+                    Thread { Core.sendPresence(this, true) }.start()
                     while (running) { val l = r.readLine() ?: break; if (Core.code(this) != code) break; Core.handleLine(this, l, true) }
                 }
                 conn.disconnect()
             } catch (e: Exception) {}
+            Core.setConnected(this, false)
             if (!running) break
             try { Thread.sleep(backoff) } catch (e: InterruptedException) { break }
             backoff = minOf(backoff * 2, 60000L)
         }
     }
-    override fun onDestroy() { running = false; thread?.interrupt(); super.onDestroy() }
+    override fun onDestroy() { running = false; thread?.interrupt(); Core.setConnected(this, false); super.onDestroy() }
 
     companion object {
         fun start(c: Context) {

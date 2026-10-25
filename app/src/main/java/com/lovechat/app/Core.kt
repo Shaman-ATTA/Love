@@ -55,40 +55,111 @@ object Core {
         String(c.doFinal(all, 12, all.size - 12))
     } catch (e: Exception) { null }
 
-    /** Blocking; call off main thread. */
-    fun send(c: Context, text: String): Boolean {
-        val code = code(c) ?: return false
-        val payload = JSONObject().put("s", myId(c)).put("t", text).put("n", prefs(c).getString("name", "")).toString()
+    /** Low-level publish. Returns null on success or a human-readable error. Blocking. */
+    fun publish(body: ByteArray, headers: Map<String, String>, put: Boolean = false): String? {
+        val code0 = codeCache ?: return "Нет кода"
+        var conn: HttpURLConnection? = null
         return try {
-            val conn = URL("$SERVER/${topic(code)}").openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"; conn.doOutput = true; conn.connectTimeout = 15000; conn.readTimeout = 15000
-            conn.setRequestProperty("Content-Type", "text/plain")
-            conn.outputStream.use { it.write(encrypt(code, payload).toByteArray()) }
-            val ok = conn.responseCode in 200..299; conn.disconnect()
-            if (ok) prefs(c).edit().putString("lastSent", text).putLong("lastSentTime", System.currentTimeMillis()).apply()
-            ok
-        } catch (e: Exception) { false }
+            conn = URL("$SERVER/${topic(code0)}").openConnection() as HttpURLConnection
+            conn.requestMethod = if (put) "PUT" else "POST"; conn.doOutput = true
+            conn.connectTimeout = 20000; conn.readTimeout = 30000
+            conn.setFixedLengthStreamingMode(body.size)
+            conn.setRequestProperty("User-Agent", "LoveChat/1.1")
+            conn.setRequestProperty("Content-Type", if (put) "application/octet-stream" else "text/plain")
+            headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
+            conn.outputStream.use { it.write(body) }
+            val rc = conn.responseCode
+            if (rc in 200..299) null else {
+                val err = try { conn.errorStream?.bufferedReader()?.readText()?.take(200) } catch (e: Exception) { null }
+                "Сервер ответил HTTP $rc" + (if (rc == 429) " (слишком много запросов, подожди минуту)" else "") + (err?.let { ": $it" } ?: "")
+            }
+        } catch (e: java.net.UnknownHostException) { "Нет доступа к ntfy.sh (DNS): ${e.message}"
+        } catch (e: java.net.SocketTimeoutException) { "Сервер не ответил вовремя (таймаут)"
+        } catch (e: javax.net.ssl.SSLException) { "Ошибка TLS/SSL: ${e.message}"
+        } catch (e: Exception) { "${e.javaClass.simpleName}: ${e.message}"
+        } finally { conn?.disconnect() }
+    }
+    @Volatile var codeCache: String? = null
+
+    private fun meta(c: Context, kind: String, extra: JSONObject.() -> Unit = {}) =
+        JSONObject().put("s", myId(c)).put("k", kind).put("n", prefs(c).getString("name", "")).apply(extra).toString()
+
+    /** Send text. Returns null on success or error text. Blocking. */
+    fun send(c: Context, text: String): String? {
+        val code = code(c) ?: return "Сначала введи код"; codeCache = code
+        val err = publish(encrypt(code, meta(c, "t") { put("t", text) }).toByteArray(), mapOf("Firebase" to "no"))
+        if (err == null) prefs(c).edit().putString("lastSent", text).putLong("lastSentTime", System.currentTimeMillis()).apply()
+        return err
+    }
+
+    /** Send drawing as encrypted attachment. */
+    fun sendImage(c: Context, png: ByteArray): String? {
+        val code = code(c) ?: return "Сначала введи код"; codeCache = code
+        val encBytes = Base64.decode(encrypt(code, Base64.encodeToString(png, Base64.NO_WRAP)), Base64.NO_WRAP)
+        val err = publish(encBytes, mapOf("Filename" to "d.bin", "Message" to encrypt(code, meta(c, "img")), "Firebase" to "no"), put = true)
+        if (err == null) prefs(c).edit().putString("lastSent", "🎨 рисунок").putLong("lastSentTime", System.currentTimeMillis()).apply()
+        return err
+    }
+
+    /** Presence ping, not stored on server (Cache: no). */
+    fun sendPresence(c: Context, ask: Boolean) {
+        val code = code(c) ?: return; codeCache = code
+        publish(encrypt(code, meta(c, "p") { if (ask) put("q", 1) }).toByteArray(), mapOf("Cache" to "no", "Firebase" to "no"))
     }
 
     fun sinceParam(c: Context): String {
         val p = prefs(c); return p.getString("lastId", null) ?: (p.getLong("pairedAt", System.currentTimeMillis() / 1000).toString())
     }
 
+    fun notifyUi(c: Context) = c.sendBroadcast(Intent("com.lovechat.app.NEW").setPackage(c.packageName))
+    fun setConnected(c: Context, v: Boolean) {
+        val p = prefs(c); if (p.getBoolean("conn", false) != v || v) { p.edit().putBoolean("conn", v).putLong("connAt", System.currentTimeMillis()).apply(); notifyUi(c) }
+    }
+
+    fun imgFile(c: Context) = java.io.File(c.filesDir, "in.png")
+    fun loadImg(c: Context, maxPx: Int): android.graphics.Bitmap? {
+        val f = imgFile(c); if (!f.exists()) return null
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(f.path, o)
+        var ss = 1; while (o.outWidth / ss > maxPx) ss *= 2
+        return android.graphics.BitmapFactory.decodeFile(f.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = ss })
+    }
+
     /** Handle one ntfy JSON line. Returns true if a new partner message was stored. */
     fun handleLine(c: Context, line: String, notifyUser: Boolean): Boolean {
         val code = code(c) ?: return false
         val o = try { JSONObject(line) } catch (e: Exception) { return false }
-        if (o.optString("event") != "message") return false
+        when (o.optString("event")) { "open", "keepalive" -> { setConnected(c, true); return false }; "message" -> {}; else -> return false }
         val id = o.optString("id"); val p = prefs(c)
         if (id == p.getString("lastId", null)) return false
+        val dec = decrypt(code, o.optString("message"))
+        val m = dec?.let { try { JSONObject(it) } catch (e: Exception) { null } }
+        val kind = m?.optString("k", "t") ?: "t"
+        if (m != null && kind == "p") { // presence: never stored, don't move lastId
+            if (m.optString("s") != myId(c)) {
+                p.edit().putLong("seen", System.currentTimeMillis()).putString("partnerName", m.optString("n")).apply(); notifyUi(c)
+                if (m.optInt("q") == 1) Thread { sendPresence(c, false) }.start()
+            }
+            return false
+        }
         p.edit().putString("lastId", id).apply()
-        val dec = decrypt(code, o.optString("message")) ?: return false
-        val m = try { JSONObject(dec) } catch (e: Exception) { return false }
-        if (m.optString("s") == myId(c)) return false
-        val text = m.optString("t"); val time = o.optLong("time", System.currentTimeMillis() / 1000) * 1000
-        p.edit().putString("inText", text).putLong("inTime", time).putString("partnerName", m.optString("n")).apply()
-        updateWidgets(c)
-        c.sendBroadcast(Intent("com.lovechat.app.NEW").setPackage(c.packageName))
+        if (m == null || m.optString("s") == myId(c)) return false
+        val time = o.optLong("time", System.currentTimeMillis() / 1000) * 1000
+        val ed = p.edit().putLong("inTime", time).putString("partnerName", m.optString("n")).putLong("seen", maxOf(p.getLong("seen", 0), time))
+        val text: String
+        if (kind == "img") {
+            val url = o.optJSONObject("attachment")?.optString("url") ?: return false
+            try {
+                val conn = URL(url).openConnection() as HttpURLConnection
+                conn.connectTimeout = 20000; conn.readTimeout = 30000
+                val enc = conn.inputStream.use { it.readBytes() }; conn.disconnect()
+                val b64 = decrypt(code, Base64.encodeToString(enc, Base64.NO_WRAP)) ?: return false
+                imgFile(c).writeBytes(Base64.decode(b64, Base64.NO_WRAP))
+            } catch (e: Exception) { return false }
+            text = "🎨 Рисунок"; ed.putString("inKind", "img")
+        } else { text = m.optString("t"); ed.putString("inKind", "t") }
+        ed.putString("inText", text).apply()
+        updateWidgets(c); notifyUi(c)
         if (notifyUser) alert(c, text)
         return true
     }
@@ -126,6 +197,9 @@ object Core {
         rv.setTextViewText(R.id.w_title, if (name.isNullOrBlank()) "💌 Love Chat" else "💌 $name")
         rv.setTextViewText(R.id.w_msg, p.getString("inText", null) ?: if (code(c) == null) "Открой приложение и введи код" else "Пока нет сообщений ❤")
         rv.setTextViewText(R.id.w_time, fmtTime(p.getLong("inTime", 0)))
+        val bmp = if (p.getString("inKind", "t") == "img") loadImg(c, 400) else null
+        if (bmp != null) { rv.setImageViewBitmap(R.id.w_img, bmp); rv.setViewVisibility(R.id.w_img, View.VISIBLE); rv.setViewVisibility(R.id.w_msg, View.GONE) }
+        else { rv.setViewVisibility(R.id.w_img, View.GONE); rv.setViewVisibility(R.id.w_msg, View.VISIBLE) }
         rv.setOnClickPendingIntent(R.id.root, openAppPI(c))
         mgr.updateAppWidget(ids, rv)
     }
@@ -141,7 +215,8 @@ object Core {
         channels(c)
         val n = Notification.Builder(c, CH_MSG).setSmallIcon(R.drawable.ic_heart)
             .setContentTitle("💌 " + (prefs(c).getString("partnerName", "").takeUnless { it.isNullOrBlank() } ?: "Новое сообщение"))
-            .setContentText(text).setStyle(Notification.BigTextStyle().bigText(text))
+            .setContentText(text)
+            .setStyle(if (prefs(c).getString("inKind", "t") == "img") loadImg(c, 800)?.let { Notification.BigPictureStyle().bigPicture(it) } ?: Notification.BigTextStyle().bigText(text) else Notification.BigTextStyle().bigText(text))
             .setContentIntent(openAppPI(c)).setAutoCancel(true)
             .setCategory(Notification.CATEGORY_MESSAGE)
         if (overlayShown) n.setOnlyAlertOnce(true)
@@ -157,6 +232,8 @@ object Core {
                 current?.let { try { wm.removeView(it) } catch (_: Exception) {} }
                 val v = LayoutInflater.from(app).inflate(R.layout.overlay, null)
                 v.findViewById<TextView>(R.id.o_msg).text = text
+                if (prefs(app).getString("inKind", "t") == "img" && text.startsWith("🎨")) loadImg(app, 600)?.let {
+                    v.findViewById<android.widget.ImageView>(R.id.o_img).apply { setImageBitmap(it); visibility = View.VISIBLE } }
                 val name = prefs(app).getString("partnerName", "")
                 if (!name.isNullOrBlank()) v.findViewById<TextView>(R.id.o_title).text = "💌 $name"
                 val lp = WindowManager.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT,

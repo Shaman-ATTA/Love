@@ -3,7 +3,12 @@
 Android-приложение для двоих: пишешь сообщение — у любимого человека оно сразу появляется в виджете на главном экране и всплывает поверх любого приложения. Соединение по секретному коду, сообщения шифруются (AES-GCM) ключом из кода.
 
 ## Скачать
-**[⬇ LoveChat.apk (v1.0)](https://github.com/Shaman-ATTA/Love/releases/download/v1.0/LoveChat.apk)** · [автосборка latest](https://github.com/Shaman-ATTA/Love/releases/download/latest/LoveChat.apk) · [все релизы](https://github.com/Shaman-ATTA/Love/releases)
+**[⬇ Скачать LoveChat.apk (последняя версия)](https://github.com/Shaman-ATTA/Love/releases/latest/download/LoveChat.apk)** · [все релизы](https://github.com/Shaman-ATTA/Love/releases)
+
+## Что умеет (v1.1)
+- Текстовые сообщения и 🎨 рисунки пальцем — в виджете, поверх любого приложения и в уведомлении
+- Статус: подключён ли ты и в сети ли партнёр
+- Понятные ошибки при отправке
 
 ## Установка
 1. Скачай LoveChat.apk на оба телефона и открой. Если запрещено — «Настройки» → «Разрешить из этого источника» → «Установить» (при предупреждении Play Protect — «Всё равно установить»).
