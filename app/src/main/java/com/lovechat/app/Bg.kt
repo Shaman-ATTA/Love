@@ -18,7 +18,8 @@ class ListenService : Service() {
         val n = Notification.Builder(this, Core.CH_SERVICE).setSmallIcon(R.drawable.ic_heart)
             .setContentTitle("Love Chat на связи ❤").setContentText("Жду сообщения от любимого человека")
             .setContentIntent(Core.openAppPI(this)).setOngoing(true).build()
-        if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) else startForeground(1, n)
+        try { if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) else startForeground(1, n) }
+        catch (e: Throwable) { android.util.Log.w("LoveChat", "startForeground failed", e); stopSelf(); return START_NOT_STICKY }
         if (Core.code(this) == null) { stopSelf(); return START_NOT_STICKY }
         if (thread?.isAlive != true) { running = true; thread = Thread { loop() }.also { it.start() }
             Thread { while (running) { try { Thread.sleep(120000) } catch (e: InterruptedException) { break }
@@ -50,10 +51,10 @@ class ListenService : Service() {
     companion object {
         fun start(c: Context) {
             if (Core.code(c) == null) return
-            try { c.startForegroundService(Intent(c, ListenService::class.java)) } catch (e: Exception) {}
-            PollJob.schedule(c)
+            try { c.startForegroundService(Intent(c, ListenService::class.java)) } catch (e: Throwable) { android.util.Log.w("LoveChat", "service start failed", e) }
+            try { PollJob.schedule(c) } catch (e: Throwable) { android.util.Log.w("LoveChat", "job schedule failed", e) }
         }
-        fun restart(c: Context) { c.stopService(Intent(c, ListenService::class.java)); start(c) }
+        fun restart(c: Context) { try { c.stopService(Intent(c, ListenService::class.java)) } catch (e: Throwable) {}; start(c) }
     }
 }
 
@@ -73,12 +74,12 @@ class PollJob : JobService() {
 }
 
 class BootReceiver : BroadcastReceiver() {
-    override fun onReceive(c: Context, i: Intent) { ListenService.start(c); Core.updateWidgets(c) }
+    override fun onReceive(c: Context, i: Intent) { try { ListenService.start(c); Core.updateWidgets(c) } catch (e: Throwable) {} }
 }
 
 class LoveWidget : AppWidgetProvider() {
     override fun onUpdate(c: Context, m: AppWidgetManager, ids: IntArray) {
-        Core.updateWidgets(c)
+        try { Core.updateWidgets(c) } catch (e: Throwable) {}
         val pr = goAsync(); Thread { Core.poll(c, false); pr.finish() }.start()
     }
 }
