@@ -71,6 +71,7 @@ class DrawActivity : Activity() {
                 Thread { val err = Core.sendImage(this@DrawActivity, png); runOnUiThread {
                     isEnabled = true; text = "Отправить рисунок ❤"
                     if (err == null) { Toast.makeText(this@DrawActivity, "Рисунок отправлен 💕", Toast.LENGTH_SHORT).show(); finish() }
+                    else if (err.startsWith("QUEUED:")) { Toast.makeText(this@DrawActivity, "Сервер занят — рисунок отправится чуть позже автоматически ⏳", Toast.LENGTH_LONG).show(); finish() }
                     else AlertDialog.Builder(this@DrawActivity).setTitle("Не удалось отправить").setMessage(err).setPositiveButton("OK", null).show() } }.start()
             } }, LinearLayout.LayoutParams(-1, dp(50)).apply { topMargin = dp(6) })
         setContentView(root)

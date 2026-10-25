@@ -31,7 +31,11 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(rx, IntentFilter("com.lovechat.app.NEW"), RECEIVER_NOT_EXPORTED)
         else registerReceiver(rx, IntentFilter("com.lovechat.app.NEW"))
         render(); ListenService.start(this)
-        Thread { Core.poll(this, false); runOnUiThread { render() } }.start()
+        Thread { try {
+            if (!Core.streamHealthy(this)) Core.poll(this, false)       // fallback only when the stream is down
+            Core.sendPresence(this, true)                               // rate-limited inside (max once / 10 min)
+            if (Core.outboxSize(this) > 0) Core.flushOutbox(this)
+        } catch (_: Exception) {}; runOnUiThread { render() } }.start()
     }
     private val h = Handler(Looper.getMainLooper())
     private val tick = object : Runnable { override fun run() { render(); h.postDelayed(this, 30000) } }
@@ -60,8 +64,7 @@ class MainActivity : Activity() {
         val conn = p.getBoolean("conn", false); val seen = p.getLong("seen", 0)
         val ago = (System.currentTimeMillis() - seen) / 60000
         val partner = when { seen == 0L -> "⚪ Партнёр ещё не подключился"
-            ago < 3 -> "🟢 Партнёр в сети"
-            ago < 60 -> "🟡 Партнёр был(а) в сети $ago мин назад"
+            ago < 75 -> "🟢 Партнёр на связи" + (if (ago >= 2) " (сигнал $ago мин назад)" else "")
             ago < 1440 -> "🟡 Партнёр был(а) в сети ${ago / 60} ч назад"
             else -> "⚪ Партнёр был(а) в сети ${ago / 1440} дн назад" }
         root.addView(card(text(if (conn) "🟢 Ты подключён(а)" else "🔴 Нет связи с сервером (переподключаюсь…)", 14f, dark, true),
@@ -79,9 +82,11 @@ class MainActivity : Activity() {
             val t = msg.text.toString().trim(); if (t.isEmpty()) return@button
             Thread { val err = Core.send(this, t); runOnUiThread {
                 if (err == null) { Toast.makeText(this, "Отправлено 💕", Toast.LENGTH_SHORT).show(); render() }
+                else if (err.startsWith("QUEUED:")) { Toast.makeText(this, "Сервер занят — отправится чуть позже автоматически ⏳", Toast.LENGTH_LONG).show(); render() }
                 else android.app.AlertDialog.Builder(this).setTitle("Не удалось отправить").setMessage(err).setPositiveButton("OK", null).show() } }.start()
         })
         root.addView(button("🎨 Нарисовать") { startActivity(Intent(this, DrawActivity::class.java)) })
+        Core.outboxSize(this).let { n -> if (n > 0) root.addView(text("⏳ В очереди: $n — отправится чуть позже автоматически" + (p.getString("outErr", null)?.let { "\n($it)" } ?: ""), 13f, pink)) }
         p.getString("lastSent", null)?.let { root.addView(text("Ты отправил(а): «$it» · ${Core.fmtTime(p.getLong("lastSentTime", 0))}", 13f)) }
 
         // Permissions / setup checklist
@@ -97,6 +102,13 @@ class MainActivity : Activity() {
                 try { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) }
                 catch (e: Exception) { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } })
         }
+        if (isMiui()) {
+            root.addView(text("📱 Xiaomi / Redmi / POCO: чтобы сообщения и рисунки появлялись, когда приложение закрыто:\n" +
+                "1) «Другие разрешения» → включи «Отображать всплывающие окна, когда запущено в фоновом режиме» и «Всплывающие окна» (Поверх других приложений).\n" +
+                "2) Включи «Автозапуск».\n3) Контроль активности (Батарея) → «Нет ограничений».\n4) В списке недавних приложений потяни карточку Love Chat вниз и закрепи замком.", 13f, pink))
+            root.addView(button("Открыть «Другие разрешения» (MIUI)") { openMiuiPerms() })
+            root.addView(button("Открыть «Автозапуск» (MIUI)") { openMiuiAutostart() })
+        }
         if (Settings.canDrawOverlays(this)) root.addView(button("Проверить всплывающее окно") { Core.showOverlay(this, "Так будут выглядеть сообщения 💖") })
 
         root.addView(text("\nДобавь виджет: долгое нажатие на главном экране → Виджеты → Love Chat", 13f))
@@ -107,7 +119,7 @@ class MainActivity : Activity() {
         root.addView(button("Поделиться кодом") { shareCode(code) })
         root.addView(button("Скопировать код") { copyCode(code) })
         root.addView(button("Отключиться / сменить код") {
-            p.edit().remove("code").remove("lastId").remove("inText").remove("inTime").remove("partnerName").remove("lastSent").apply()
+            p.edit().remove("code").remove("lastId").remove("lastTime").remove("seenIds").remove("outbox").remove("seen").remove("lastPres").remove("inText").remove("inTime").remove("partnerName").remove("lastSent").apply()
             stopService(Intent(this, ListenService::class.java)); Core.updateWidgets(this); render() })
     }
 
@@ -124,10 +136,24 @@ class MainActivity : Activity() {
             copyCode(f.text.toString().trim()) })
         root.addView(button("Подключиться ❤") {
             val c = Core.norm(f.text.toString()); if (c.length < 8) { Toast.makeText(this, "Код слишком короткий (минимум 8 символов)", Toast.LENGTH_SHORT).show(); return@button }
-            Core.prefs(this).edit().putString("code", c).putLong("pairedAt", System.currentTimeMillis() / 1000 - 3600).remove("lastId").apply()
+            Core.prefs(this).edit().putString("code", c).putLong("pairedAt", System.currentTimeMillis() / 1000 - 3600).remove("lastId").remove("lastTime").remove("seenIds").remove("seen").remove("lastPres").apply()
             ListenService.restart(this); Core.updateWidgets(this); render() })
     }
 
+    private fun isMiui() = Build.MANUFACTURER.lowercase().let { it.contains("xiaomi") || it.contains("redmi") || it.contains("poco") }
+    private fun appDetails() = try { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) } catch (_: Exception) {}
+    private fun openMiuiPerms() {
+        val tries = listOf(
+            Intent("miui.intent.action.APP_PERM_EDITOR").setClassName("com.miui.securitycenter", "com.miui.permcenter.permissions.PermissionsEditorActivity").putExtra("extra_pkgname", packageName),
+            Intent("miui.intent.action.APP_PERM_EDITOR").setClassName("com.miui.securitycenter", "com.miui.permcenter.permissions.AppPermissionsEditorActivity").putExtra("extra_pkgname", packageName),
+            Intent("miui.intent.action.APP_PERM_EDITOR").putExtra("extra_pkgname", packageName))
+        for (i in tries) try { startActivity(i); return } catch (_: Exception) {}
+        appDetails()
+    }
+    private fun openMiuiAutostart() {
+        try { startActivity(Intent().setClassName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")) }
+        catch (_: Exception) { appDetails() }
+    }
     private fun shareCode(c: String) {
         try {
             val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, "Мой код для Love Chat 💌: $c\nВведи его в приложении и нажми «Подключиться».")

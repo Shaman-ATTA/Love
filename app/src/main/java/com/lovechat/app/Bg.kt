@@ -22,31 +22,48 @@ class ListenService : Service() {
         catch (e: Throwable) { android.util.Log.w("LoveChat", "startForeground failed", e); stopSelf(); return START_NOT_STICKY }
         if (Core.code(this) == null) { stopSelf(); return START_NOT_STICKY }
         if (thread?.isAlive != true) { running = true; thread = Thread { loop() }.also { it.start() }
-            Thread { while (running) { try { Thread.sleep(120000) } catch (e: InterruptedException) { break }
-                if (running && Core.prefs(this).getBoolean("conn", false)) Core.sendPresence(this, false) } }.start() }
+            worker = Thread { work() }.also { it.start() } }
         return START_STICKY
     }
+    private var worker: Thread? = null
+    /** Slow housekeeping: hourly presence heartbeat + outbox retries. No other network use. */
+    private fun work() {
+        while (running) {
+            try { Thread.sleep(30_000) } catch (e: InterruptedException) { break }
+            if (!running) break
+            try {
+                val p = Core.prefs(this); val now = System.currentTimeMillis()
+                if (Core.outboxSize(this) > 0 && p.getLong("blockedUntil", 0) <= now) Core.flushOutbox(this)
+                if (Core.streamHealthy(this) && now - p.getLong("lastPres", 0) > 60 * 60_000L) Core.sendPresence(this, false)
+            } catch (e: Exception) {}
+        }
+    }
     private fun loop() {
-        var backoff = 2000L
+        var backoff = 10_000L
         while (running) {
             val code = Core.code(this) ?: break
+            var opened = 0L
             try {
                 val conn = URL("${Core.SERVER}/${Core.topic(code)}/json?since=${Core.sinceParam(this)}").openConnection() as HttpURLConnection
-                conn.connectTimeout = 15000; conn.readTimeout = 90000 // ntfy sends keepalive every ~45s
+                conn.connectTimeout = 20000; conn.readTimeout = 120_000 // ntfy keepalive ~45s
+                conn.setRequestProperty("User-Agent", "LoveChat/1.4")
+                val rc = conn.responseCode
+                if (rc == 429) { backoff = maxOf(backoff, 120_000L); conn.disconnect(); throw java.io.IOException("429") }
                 conn.inputStream.bufferedReader().use { r ->
-                    backoff = 2000L; Core.setConnected(this, true)
-                    Thread { Core.sendPresence(this, true) }.start()
+                    opened = System.currentTimeMillis(); Core.setConnected(this, true)
+                    Thread { try { Core.sendPresence(this, true); Core.flushOutbox(this) } catch (_: Exception) {} }.start()
                     while (running) { val l = r.readLine() ?: break; if (Core.code(this) != code) break; Core.handleLine(this, l, true) }
                 }
                 conn.disconnect()
             } catch (e: Exception) {}
             Core.setConnected(this, false)
             if (!running) break
+            if (opened > 0 && System.currentTimeMillis() - opened > 60_000L) backoff = 10_000L
             try { Thread.sleep(backoff) } catch (e: InterruptedException) { break }
-            backoff = minOf(backoff * 2, 60000L)
+            backoff = minOf(backoff * 2, 10 * 60_000L)
         }
     }
-    override fun onDestroy() { running = false; thread?.interrupt(); Core.setConnected(this, false); super.onDestroy() }
+    override fun onDestroy() { running = false; thread?.interrupt(); worker?.interrupt(); Core.setConnected(this, false); super.onDestroy() }
 
     companion object {
         fun start(c: Context) {
@@ -60,13 +77,18 @@ class ListenService : Service() {
 
 class PollJob : JobService() {
     override fun onStartJob(p: JobParameters): Boolean {
-        Thread { Core.poll(this, true); ListenService.start(this); jobFinished(p, false) }.start()
+        Thread { try {
+            if (!Core.streamHealthy(this)) Core.poll(this, true)   // fallback only
+            if (Core.outboxSize(this) > 0) Core.flushOutbox(this)
+            ListenService.start(this) } catch (_: Exception) {}
+            jobFinished(p, false) }.start()
         return true
     }
     override fun onStopJob(p: JobParameters) = true
     companion object {
         fun schedule(c: Context) {
             val js = c.getSystemService(JobScheduler::class.java)
+            if (js.getPendingJob(7) != null) return
             js.schedule(JobInfo.Builder(7, ComponentName(c, PollJob::class.java))
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setPeriodic(15 * 60 * 1000L).setPersisted(true).build())
         }
@@ -80,6 +102,6 @@ class BootReceiver : BroadcastReceiver() {
 class LoveWidget : AppWidgetProvider() {
     override fun onUpdate(c: Context, m: AppWidgetManager, ids: IntArray) {
         try { Core.updateWidgets(c) } catch (e: Throwable) {}
-        val pr = goAsync(); Thread { Core.poll(c, false); pr.finish() }.start()
+        ListenService.start(c)
     }
 }
