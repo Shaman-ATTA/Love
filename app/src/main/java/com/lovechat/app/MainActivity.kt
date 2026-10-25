@@ -103,23 +103,40 @@ class MainActivity : Activity() {
         val name = field("Твоё имя (видно партнёру)", p.getString("name", "") ?: "")
         root.addView(name)
         root.addView(button("Сохранить имя") { p.edit().putString("name", name.text.toString().trim()).apply(); Toast.makeText(this, "Сохранено", Toast.LENGTH_SHORT).show() })
-        root.addView(text("Ваш секретный код: $code", 13f))
+        root.addView(text("Ваш секретный код (у обоих одинаковый): $code", 15f, dark, true).apply { setTextIsSelectable(true) })
+        root.addView(button("Поделиться кодом") { shareCode(code) })
+        root.addView(button("Скопировать код") { copyCode(code) })
         root.addView(button("Отключиться / сменить код") {
             p.edit().remove("code").remove("lastId").remove("inText").remove("inTime").remove("partnerName").remove("lastSent").apply()
             stopService(Intent(this, ListenService::class.java)); Core.updateWidgets(this); render() })
     }
 
     private fun renderPair() {
-        root.addView(text("Соединитесь с любимым человеком по секретному коду. Один создаёт код и передаёт его второму, второй вводит тот же код.", 15f))
+        root.addView(text("Оба вводят один и тот же код.\n\n1. Один нажимает «Создать новый код» и отправляет его второму («Поделиться» или «Скопировать»).\n2. Оба вводят этот же код и нажимают «Подключиться ❤».", 15f))
         val f = field("Секретный код, например ABCD-EFGH-JKLM")
         root.addView(f)
         root.addView(button("Создать новый код") { f.setText(Core.genCode()) })
         root.addView(button("Поделиться кодом") {
-            val c = f.text.toString().trim(); if (c.isEmpty()) return@button
-            startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, "Мой код для Love Chat 💌: $c"), "Поделиться")) })
+            if (f.text.toString().isBlank()) f.setText(Core.genCode())
+            shareCode(f.text.toString().trim()) })
+        root.addView(button("Скопировать код") {
+            if (f.text.toString().isBlank()) f.setText(Core.genCode())
+            copyCode(f.text.toString().trim()) })
         root.addView(button("Подключиться ❤") {
             val c = Core.norm(f.text.toString()); if (c.length < 8) { Toast.makeText(this, "Код слишком короткий (минимум 8 символов)", Toast.LENGTH_SHORT).show(); return@button }
             Core.prefs(this).edit().putString("code", c).putLong("pairedAt", System.currentTimeMillis() / 1000 - 3600).remove("lastId").apply()
             ListenService.restart(this); Core.updateWidgets(this); render() })
+    }
+
+    private fun shareCode(c: String) {
+        try {
+            val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, "Мой код для Love Chat 💌: $c\nВведи его в приложении и нажми «Подключиться».")
+            startActivity(Intent.createChooser(send, "Поделиться кодом"))
+        } catch (e: Throwable) { Toast.makeText(this, "Не удалось открыть «Поделиться», код скопирован", Toast.LENGTH_LONG).show(); copyCode(c) }
+    }
+    private fun copyCode(c: String) {
+        try { getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(android.content.ClipData.newPlainText("Love Chat код", c))
+            Toast.makeText(this, "Код скопирован: $c", Toast.LENGTH_SHORT).show()
+        } catch (e: Throwable) { Toast.makeText(this, "Не удалось скопировать: ${e.message}", Toast.LENGTH_LONG).show() }
     }
 }
