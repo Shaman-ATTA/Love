@@ -1,0 +1,5 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:id="@+id/root" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:padding="14dp" android:background="@drawable/card_bg">
+ <TextView android:id="@+id/w_title" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="💌 Love Chat" android:textColor="#FF880E4F" android:textSize="12sp"/>
+ <TextView android:id="@+id/w_msg" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:gravity="center_vertical" android:text="Пока нет сообщений" android:textColor="#FF4A0E2A" android:textSize="18sp" android:textStyle="bold" android:ellipsize="end"/>
+ <TextView android:id="@+id/w_time" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="" android:textColor="#FF880E4F" android:textSize="11sp"/>
+</LinearLayout>
